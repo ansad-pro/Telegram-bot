@@ -131,7 +131,8 @@ async def handle_terabox_link(client, message: Message):
     try:
         url = message.text
         encoded_url = urllib.parse.quote(url)
-        api_url = f"https://api.tera-peek.in/api/resolve?url={encoded_url}&mode=stream"
+        # FIX 1: mode=download ആക്കി മാറ്റി
+        api_url = f"https://api.tera-peek.in/api/resolve?url={encoded_url}&mode=download"
         
         token = await get_valid_token()
         if not token:
@@ -183,18 +184,17 @@ async def handle_terabox_link(client, message: Message):
         start_time = time.time()
         current_downloaded = 0
         
-        # Default Base Headers
+        # FIX 2: Terabox Official PC/App User-Agent വഴി സ്പീഡ് കൂട്ടാൻ നോക്കുന്നു
         download_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "User-Agent": "netdisk;PC",
             "Referer": "https://www.terabox.com/",
-            "Accept": "*/*"
+            "Accept": "*/*",
+            "Connection": "keep-alive"
         }
         
-        # FIX: ഹെഡറുകൾ ഡ്യൂപ്ലിക്കേറ്റ് വരാതെ ക്ലീൻ ആയി സെറ്റ് ചെയ്യുന്നു
         api_provided_headers = file_data.get("headers")
         if api_provided_headers and isinstance(api_provided_headers, dict):
-            download_headers = {str(k): str(v) for k, v in api_provided_headers.items()}
-            # Referer നിർബന്ധമായതു കൊണ്ട് ഇല്ലെങ്കിൽ മാത്രം ചേർക്കുന്നു
+            download_headers.update({str(k): str(v) for k, v in api_provided_headers.items()})
             if "Referer" not in download_headers and "referer" not in download_headers:
                 download_headers["Referer"] = "https://www.terabox.com/"
         
@@ -208,7 +208,6 @@ async def handle_terabox_link(client, message: Message):
                             current_downloaded += len(chunk)
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, "Downloading", user_id)
                 else:
-                    # ഇവിടെ വെച്ച് എന്താണ് എറർ എന്ന് കൃത്യമായി കാണിക്കും
                     await status_msg.edit_text(f"❌ **Terabox Download Failed!**\nServer returned status code: `{resp.status}`\n\nമാറ്റ് ഏതെങ്കിലും ലിങ്ക് അയച്ചു നോക്കുക.")
                     delete_status = False
                     return

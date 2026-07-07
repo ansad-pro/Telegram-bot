@@ -1,13 +1,15 @@
 import os
 import time
 import math
+import threading
 import urllib.parse
 import aiohttp
 import aiofiles
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 from pyrogram import Client, filters
 from pyrogram.types import Message
 
-# Koyeb Environment Variables-il ninnu details edukkarulla setup
+# Koyeb Environment Variables
 API_ID = os.environ.get("API_ID")        
 API_HASH = os.environ.get("API_HASH")    
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  
@@ -15,14 +17,25 @@ AUTH_TOKEN = os.environ.get("AUTH_TOKEN")
 
 app = Client("terabox_bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN)
 
-# Readable Format-lekku size maattan ulla function
+# --- FAKE PORT SERVER FOR KOYEB TIMEOUT FIX ---
+def run_dummy_server():
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
+        print(f"ℹ️ Fake Port Server started on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"❌ Dummy server error: {e}")
+
+threading.Thread(target=run_dummy_server, daemon=True).start()
+# -----------------------------------------------
+
 def format_size(bytes):
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if bytes < 1024:
             return f"{bytes:.2f} {unit}"
         bytes /= 1024
 
-# Live Progress Bar function (Download-num Upload-num ithu use cheyyam)
 async def progress_bar(current, total, status_msg, start_time, action="Processing"):
     if not total:
         return
@@ -30,7 +43,6 @@ async def progress_bar(current, total, status_msg, start_time, action="Processin
     now = time.time()
     diff = now - start_time
     
-    # 3 seconds gap-il maathrame Telegram-lekku update ayakku (To avoid flood wait)
     if round(diff % 3) == 0 or current == total:
         percentage = current * 100 / total
         speed = current / diff if diff > 0 else 0
@@ -57,14 +69,16 @@ async def progress_bar(current, total, status_msg, start_time, action="Processin
 async def start(client, message):
     await message.reply_text("Hello! Terabox link ayachu tharu. Live progress bar ood koodi super fast aayi download cheyth file ayachu tharam! 🚀🍿")
 
-@app.on_message(filters.text & filters.regex(r"(terabox\.com|1024terabox\.com|teraboxapp\.com)"))
+DOMAINS_REGEX = r"(terabox\.app|teraboxshare\.com|terabox\.com|1024terabox\.com|teraboxlink\.com|terasharefile\.com|terafileshare\.com|terasharelink\.com)"
+
+@app.on_message(filters.text & filters.regex(DOMAINS_REGEX))
 async def handle_terabox_link(client, message: Message):
     url = message.text
     status_msg = await message.reply_text("🔍 Terabox link check cheyyunnu...")
     filename = None
 
     try:
-        # 1. API-lekku Request ayakkunnu
+        # 1. API Request
         encoded_url = urllib.parse.quote(url)
         api_url = f"https://api.tera-peek.in/api/resolve?url={encoded_url}&mode=stream"
         
@@ -90,27 +104,34 @@ async def handle_terabox_link(client, message: Message):
             await status_msg.edit_text("❌ Direct download link generate cheyyan pattiyilla.")
             return
 
-        # 2. HIGH-SPEED DOWNLOAD PROCESS (Live Progress bar)
+        # 2. HIGH-SPEED DOWNLOAD PROCESS (User-Agent Fix Added Here)
         await status_msg.edit_text("⬇️ Downloading start cheyyunnu...")
         start_time = time.time()
         current_downloaded = 0
         
+        # Terabox സെർവറിനെ പറ്റിക്കാൻ ബ്രൗസർ ഹെഡർ സെറ്റ് ചെയ്യുന്നു
+        download_headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Connection": "keep-alive"
+        }
+        
         async with aiohttp.ClientSession() as session:
-            async with session.get(dlink) as resp:
+            # download_headers ഇവിടെ പാസ്സ് ചെയ്യുന്നു
+            async with session.get(dlink, headers=download_headers) as resp:
                 if resp.status == 200:
                     total_size = int(resp.headers.get('content-length', 0))
                     
-                    # 5MB chunk sizes complex files-nu speed kootum
                     async with aiofiles.open(filename, mode='wb') as f:
-                        async for chunk in resp.content.iter_chunked(5 * 1024 * 1024): 
+                        async for chunk in resp.content.iter_chunked(5 * 1024 * 1024): # 5MB Chunks
                             await f.write(chunk)
                             current_downloaded += len(chunk)
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, action="Downloading")
                 else:
-                    await status_msg.edit_text("❌ Terabox server-il ninnu file download cheyyan pattiyilla.")
+                    await status_msg.edit_text(f"❌ Terabox server error. Status: {resp.status}")
                     return
 
-        # 3. HIGH-SPEED UPLOAD PROCESS (Live Progress Bar)
+        # 3. HIGH-SPEED UPLOAD PROCESS
         await status_msg.edit_text("⬆️ Telegram-lekku upload cheyyunnu...")
         upload_start_time = time.time()
         
@@ -126,7 +147,6 @@ async def handle_terabox_link(client, message: Message):
         await message.reply_text(f"❌ Oru error vannu: {str(e)}")
     
     finally:
-        # 4. Storage Auto-Delete (Error vannalum file delete aavum)
         if filename and os.path.exists(filename):
             os.remove(filename)
         try:
@@ -136,4 +156,3 @@ async def handle_terabox_link(client, message: Message):
 
 if __name__ == "__main__":
     app.run()
-

@@ -24,7 +24,7 @@ CURRENT_AUTH_TOKEN = None
 app = Client("terabox_bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 active_tasks = {}
-last_progress_text = {} # ഒരേ മെസ്സേജ് വീണ്ടും എഡിറ്റ് ചെയ്യുന്നത് തടയാൻ പ്രോഗ്രസ്സ് ട്രാക്കർ
+last_progress_text = {} 
 
 # --- FAKE PORT SERVER FOR KOYEB TIMEOUT FIX ---
 def run_dummy_server():
@@ -97,7 +97,6 @@ async def progress_bar(current, total, status_msg, start_time, action, user_id):
             f"└ **ETA:** {eta}s"
         )
         
-        # കോൺടെന്റ് മാറിയിട്ടില്ലെങ്കിൽ എഡിറ്റ് ചെയ്യില്ല (MESSAGE_NOT_MODIFIED Fix)
         if last_progress_text.get(user_id) == progress_str:
             return
         
@@ -126,6 +125,7 @@ async def handle_terabox_link(client, message: Message):
 
     status_msg = await message.reply_text("🔍 Terabox link check cheyyunnu...")
     filename = None
+    delete_status = True  # FIX: എറർ വന്നാൽ മെസ്സേജ് ഡിലീറ്റ് ചെയ്യാതിരിക്കാനുള്ള ഫ്ലാഗ്
     active_tasks[user_id] = asyncio.current_task()
 
     try:
@@ -136,6 +136,7 @@ async def handle_terabox_link(client, message: Message):
         token = await get_valid_token()
         if not token:
             await status_msg.edit_text("❌ Authentication Token ജനറേറ്റ് ചെയ്യാൻ പറ്റിയില്ല! Koyeb-ൽ REFRESH_TOKEN ചെക്ക് ചെയ്യുക.")
+            delete_status = False
             return
 
         api_success = False
@@ -154,15 +155,18 @@ async def handle_terabox_link(client, message: Message):
                         token = await get_valid_token(force_refresh=True)
                     else:
                         await status_msg.edit_text(f"❌ API error! Status code: {response.status}")
+                        delete_status = False
                         return
 
         if not api_success:
             await status_msg.edit_text("❌ Token refresh ചെയ്തിട്ടും ലോഗിൻ പരാജയപ്പെട്ടു. Refresh Token മാറിയിട്ടുണ്ടാകാം!")
+            delete_status = False
             return
 
         files = data.get("files", [])
         if not files:
             await status_msg.edit_text("❌ Ee link-il files onnum kandilla.")
+            delete_status = False
             return
         
         file_data = files[0]
@@ -171,6 +175,7 @@ async def handle_terabox_link(client, message: Message):
 
         if not dlink:
             await status_msg.edit_text("❌ Direct download link generate cheyyan pattiyilla.")
+            delete_status = False
             return
 
         # 2. DOWNLOAD PROCESS
@@ -178,7 +183,6 @@ async def handle_terabox_link(client, message: Message):
         start_time = time.time()
         current_downloaded = 0
         
-        # Optimized Desktop User-Agent & Headers for bypassing speed limit
         download_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
@@ -192,13 +196,13 @@ async def handle_terabox_link(client, message: Message):
                 if resp.status == 200:
                     total_size = int(resp.headers.get('content-length', 0))
                     async with aiofiles.open(filename, mode='wb') as f:
-                        # Decreased chunk size to 64KB for stable stream
                         async for chunk in resp.content.iter_chunked(1024 * 64): 
                             await f.write(chunk)
                             current_downloaded += len(chunk)
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, "Downloading", user_id)
                 else:
                     await status_msg.edit_text(f"❌ Terabox server error. Status: {resp.status}")
+                    delete_status = False
                     return
 
         # 3. FILE SIZE CHECK (ANTI-72 BYTE FAKE FILE FIX)
@@ -210,6 +214,7 @@ async def handle_terabox_link(client, message: Message):
             except Exception:
                 await status_msg.edit_text("❌ **Terabox Error:** ഡൗൺലോഡ് പരാജയപ്പെട്ടു. (Corrupted File)")
             
+            delete_status = False
             if os.path.exists(filename): 
                 os.remove(filename)
             return
@@ -235,10 +240,13 @@ async def handle_terabox_link(client, message: Message):
         last_progress_text.pop(user_id, None)
         if filename and os.path.exists(filename):
             os.remove(filename)
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
+        
+        # FIX: ലോജിക് മാറ്റി, എറർ ഇല്ലാത്തപ്പോൾ മാത്രം ഡിലീറ്റ് ചെയ്യും
+        if delete_status:
+            try:
+                await status_msg.delete()
+            except Exception:
+                pass
 
 # --- CANCEL BUTTON CLICK HANDLER ---
 @app.on_callback_query(filters.regex(r"^cancel_(\d+)"))

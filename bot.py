@@ -19,11 +19,12 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY", "AIzaSyBo6KSvm_YjKLJxGfJoako9ODOJzignH9c")
 REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN") 
 
-# ബാക്ക്ഗ്രൗണ്ടിൽ ഓട്ടോമാറ്റിക് ആയി അപ്ഡേറ്റ് ആകുന്ന വേരിയബിൾ
 CURRENT_AUTH_TOKEN = None
 
 app = Client("terabox_bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN)
+
 active_tasks = {}
+last_progress_text = {} # ഒരേ മെസ്സേജ് വീണ്ടും എഡിറ്റ് ചെയ്യുന്നത് തടയാൻ പ്രോഗ്രസ്സ് ട്രാക്കർ
 
 # --- FAKE PORT SERVER FOR KOYEB TIMEOUT FIX ---
 def run_dummy_server():
@@ -43,7 +44,7 @@ async def get_valid_token(force_refresh=False):
     global CURRENT_AUTH_TOKEN
     
     if not REFRESH_TOKEN:
-        print("❌ ERROR: REFRESH_TOKEN is not set in Koyeb environment variables!")
+        print("❌ ERROR: REFRESH_TOKEN is not set!")
         return None
 
     if not CURRENT_AUTH_TOKEN or force_refresh:
@@ -96,11 +97,16 @@ async def progress_bar(current, total, status_msg, start_time, action, user_id):
             f"└ **ETA:** {eta}s"
         )
         
+        # കോൺടെന്റ് മാറിയിട്ടില്ലെങ്കിൽ എഡിറ്റ് ചെയ്യില്ല (MESSAGE_NOT_MODIFIED Fix)
+        if last_progress_text.get(user_id) == progress_str:
+            return
+        
         reply_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel Process", callback_data=f"cancel_{user_id}")]
         ])
         try:
             await status_msg.edit_text(progress_str, reply_markup=reply_markup)
+            last_progress_text[user_id] = progress_str 
         except Exception:
             pass
 
@@ -127,7 +133,6 @@ async def handle_terabox_link(client, message: Message):
         encoded_url = urllib.parse.quote(url)
         api_url = f"https://api.tera-peek.in/api/resolve?url={encoded_url}&mode=stream"
         
-        # ഓട്ടോമാറ്റിക് ടോക്കൺ എടുക്കുന്നു
         token = await get_valid_token()
         if not token:
             await status_msg.edit_text("❌ Authentication Token ജനറേറ്റ് ചെയ്യാൻ പറ്റിയില്ല! Koyeb-ൽ REFRESH_TOKEN ചെക്ക് ചെയ്യുക.")
@@ -136,7 +141,6 @@ async def handle_terabox_link(client, message: Message):
         api_success = False
         data = None
 
-        # API Request അയക്കുന്നു (ടോക്കൺ എക്സ്പെയർ ആയാൽ റിഫ്രഷ് ചെയ്യാനുള്ള ലോജിക്)
         for attempt in range(2): 
             headers = {"Authorization": f"Bearer {token}"}
             async with aiohttp.ClientSession() as session:
@@ -174,12 +178,13 @@ async def handle_terabox_link(client, message: Message):
         start_time = time.time()
         current_downloaded = 0
         
-        # Mobile Chrome User Agent + Referer Added for bypassing 80MB Throttling
+        # Optimized Desktop User-Agent & Headers for bypassing speed limit
         download_headers = {
-            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
-            "Accept": "*/*",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
             "Connection": "keep-alive",
-            "Referer": "https://www.terabox.com/"
+            "Referer": "https://www.terabox.com/sharing/link",
+            "Accept-Language": "en-US,en;q=0.9"
         }
         
         async with aiohttp.ClientSession() as session:
@@ -187,8 +192,8 @@ async def handle_terabox_link(client, message: Message):
                 if resp.status == 200:
                     total_size = int(resp.headers.get('content-length', 0))
                     async with aiofiles.open(filename, mode='wb') as f:
-                        # 1MB Chunks for smooth large file flow
-                        async for chunk in resp.content.iter_chunked(1024 * 1024): 
+                        # Decreased chunk size to 64KB for stable stream
+                        async for chunk in resp.content.iter_chunked(1024 * 64): 
                             await f.write(chunk)
                             current_downloaded += len(chunk)
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, "Downloading", user_id)
@@ -196,7 +201,20 @@ async def handle_terabox_link(client, message: Message):
                     await status_msg.edit_text(f"❌ Terabox server error. Status: {resp.status}")
                     return
 
-        # 3. UPLOAD PROCESS
+        # 3. FILE SIZE CHECK (ANTI-72 BYTE FAKE FILE FIX)
+        if os.path.exists(filename) and os.path.getsize(filename) < 50 * 1024:
+            try:
+                async with aiofiles.open(filename, mode='r', errors='ignore') as f:
+                    error_content = await f.read()
+                await status_msg.edit_text(f"❌ **Terabox Error:**\nസെർവർ വീഡിയോയ്ക്ക് പകരം ഒരു എറർ മെസ്സേജ് ആണ് നൽകിയത്. ലിങ്ക് മാറ്റി നോക്കുക!\n\n`{error_content[:150]}`")
+            except Exception:
+                await status_msg.edit_text("❌ **Terabox Error:** ഡൗൺലോഡ് പരാജയപ്പെട്ടു. (Corrupted File)")
+            
+            if os.path.exists(filename): 
+                os.remove(filename)
+            return
+
+        # 4. UPLOAD PROCESS
         await status_msg.edit_text("⬆️ Telegram-lekku upload cheyyunnu...")
         upload_start_time = time.time()
         
@@ -214,6 +232,7 @@ async def handle_terabox_link(client, message: Message):
         await message.reply_text(f"❌ Oru error vannu: {str(e)}")
     finally:
         active_tasks.pop(user_id, None)
+        last_progress_text.pop(user_id, None)
         if filename and os.path.exists(filename):
             os.remove(filename)
         try:

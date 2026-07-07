@@ -125,7 +125,7 @@ async def handle_terabox_link(client, message: Message):
 
     status_msg = await message.reply_text("🔍 Terabox link check cheyyunnu...")
     filename = None
-    delete_status = True  # FIX: എറർ വന്നാൽ മെസ്സേജ് ഡിലീറ്റ് ചെയ്യാതിരിക്കാനുള്ള ഫ്ലാഗ്
+    delete_status = True  
     active_tasks[user_id] = asyncio.current_task()
 
     try:
@@ -183,20 +183,27 @@ async def handle_terabox_link(client, message: Message):
         start_time = time.time()
         current_downloaded = 0
         
+        # Base High-Speed Headers
         download_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept": "*/*",
             "Connection": "keep-alive",
-            "Referer": "https://www.terabox.com/sharing/link",
+            "Referer": "https://www.terabox.com/",
             "Accept-Language": "en-US,en;q=0.9"
         }
+        
+        # FIX: API തരുന്ന പ്രത്യേക Headers/Cookies ഉണ്ടെങ്കിൽ അത് കൂടി ഇതിലേക്ക് ചേർക്കുന്നു (Speed Boost)
+        api_provided_headers = file_data.get("headers", {})
+        if api_provided_headers:
+            download_headers.update(api_provided_headers)
         
         async with aiohttp.ClientSession() as session:
             async with session.get(dlink, headers=download_headers) as resp:
                 if resp.status == 200:
                     total_size = int(resp.headers.get('content-length', 0))
                     async with aiofiles.open(filename, mode='wb') as f:
-                        async for chunk in resp.content.iter_chunked(1024 * 64): 
+                        # 128KB അലോക്കേഷൻ സ്റ്റേബിൾ കണക്ഷന് വേണ്ടി
+                        async for chunk in resp.content.iter_chunked(1024 * 128): 
                             await f.write(chunk)
                             current_downloaded += len(chunk)
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, "Downloading", user_id)
@@ -241,7 +248,6 @@ async def handle_terabox_link(client, message: Message):
         if filename and os.path.exists(filename):
             os.remove(filename)
         
-        # FIX: ലോജിക് മാറ്റി, എറർ ഇല്ലാത്തപ്പോൾ മാത്രം ഡിലീറ്റ് ചെയ്യും
         if delete_status:
             try:
                 await status_msg.delete()

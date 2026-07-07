@@ -14,11 +14,15 @@ from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, 
 API_ID = os.environ.get("API_ID")        
 API_HASH = os.environ.get("API_HASH")    
 BOT_TOKEN = os.environ.get("BOT_TOKEN")  
-AUTH_TOKEN = os.environ.get("AUTH_TOKEN") 
+
+# Firebase Credentials
+FIREBASE_API_KEY = os.environ.get("FIREBASE_API_KEY", "AIzaSyBo6KSvm_YjKLJxGfJoako9ODOJzignH9c")
+REFRESH_TOKEN = os.environ.get("REFRESH_TOKEN") 
+
+# ബാക്ക്ഗ്രൗണ്ടിൽ ഓട്ടോമാറ്റിക് ആയി അപ്ഡേറ്റ് ആകുന്ന വേരിയബിൾ
+CURRENT_AUTH_TOKEN = None
 
 app = Client("terabox_bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT_TOKEN)
-
-# Active tasks ട്രാക്ക് ചെയ്യാനുള്ള ഡിക്ഷ്ണറി
 active_tasks = {}
 
 # --- FAKE PORT SERVER FOR KOYEB TIMEOUT FIX ---
@@ -34,17 +38,44 @@ def run_dummy_server():
 threading.Thread(target=run_dummy_server, daemon=True).start()
 # -----------------------------------------------
 
+# --- AUTOMATIC FIREBASE TOKEN REFRESH FUNCTION ---
+async def get_valid_token(force_refresh=False):
+    global CURRENT_AUTH_TOKEN
+    
+    if not REFRESH_TOKEN:
+        print("❌ ERROR: REFRESH_TOKEN is not set in Koyeb environment variables!")
+        return None
+
+    if not CURRENT_AUTH_TOKEN or force_refresh:
+        print("🔄 Fetching fresh ID Token from Firebase...")
+        refresh_url = f"https://securetoken.googleapis.com/v1/token?key={FIREBASE_API_KEY}"
+        payload = {
+            "grant_type": "refresh_token",
+            "refresh_token": REFRESH_TOKEN
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(refresh_url, data=payload) as response:
+                if response.status == 200:
+                    res_data = await response.json()
+                    CURRENT_AUTH_TOKEN = res_data.get("id_token")
+                    print("✅ New ID Token successfully generated!")
+                else:
+                    print(f"❌ Firebase token refresh failed! Status: {response.status}")
+                    CURRENT_AUTH_TOKEN = None
+                    
+    return CURRENT_AUTH_TOKEN
+# --------------------------------------------------
+
 def format_size(bytes):
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
         if bytes < 1024:
             return f"{bytes:.2f} {unit}"
         bytes /= 1024
 
-# Progress bar-ൽ Cancel Button നിലനിർത്താൻ user_id കൂടി പാസ്സ് ചെയ്യുന്നു
 async def progress_bar(current, total, status_msg, start_time, action, user_id):
     if not total:
         return
-    
     now = time.time()
     diff = now - start_time
     
@@ -65,11 +96,9 @@ async def progress_bar(current, total, status_msg, start_time, action, user_id):
             f"└ **ETA:** {eta}s"
         )
         
-        # Cancel ചെയ്യാനുള്ള ഇൻലൈൻ ബട്ടൺ
         reply_markup = InlineKeyboardMarkup([
             [InlineKeyboardButton("❌ Cancel Process", callback_data=f"cancel_{user_id}")]
         ])
-        
         try:
             await status_msg.edit_text(progress_str, reply_markup=reply_markup)
         except Exception:
@@ -85,40 +114,56 @@ DOMAINS_REGEX = r"(terabox\.app|teraboxshare\.com|terabox\.com|1024terabox\.com|
 async def handle_terabox_link(client, message: Message):
     user_id = message.from_user.id
     
-    # ഒരു യൂസർ ഒരേ സമയം ഒന്നിലധികം ലിങ്ക് ഇടുന്നത് തടയാൻ
     if user_id in active_tasks:
         await message.reply_text("❌ നിന്റെ ഒരു ടാസ്ക് ഓൾറെഡി നടക്കുന്നുണ്ട്. അത് കഴിയുകയോ അല്ലെങ്കിൽ Cancel ചെയ്യുകയോ ചെയ്യുക!")
         return
 
     status_msg = await message.reply_text("🔍 Terabox link check cheyyunnu...")
     filename = None
-    
-    # ഈ ടാസ്ക് ട്രാക്കിംഗിലേക്ക് മാറ്റുന്നു
     active_tasks[user_id] = asyncio.current_task()
 
     try:
         url = message.text
-        # 1. API Request
         encoded_url = urllib.parse.quote(url)
         api_url = f"https://api.tera-peek.in/api/resolve?url={encoded_url}&mode=stream"
         
-        headers = {"Authorization": f"Bearer {AUTH_TOKEN}"}
+        # ഓട്ടോമാറ്റിക് ടോക്കൺ എടുക്കുന്നു
+        token = await get_valid_token()
+        if not token:
+            await status_msg.edit_text("❌ Authentication Token ജനറേറ്റ് ചെയ്യാൻ പറ്റിയില്ല! Koyeb-ൽ REFRESH_TOKEN ചെക്ക് ചെയ്യുക.")
+            return
+
+        api_success = False
+        data = None
+
+        # API Request അയക്കുന്നു (ടോക്കൺ എക്സ്പെയർ ആയാൽ റിഫ്രഷ് ചെയ്യാനുള്ള ലോജിക്)
+        for attempt in range(2): 
+            headers = {"Authorization": f"Bearer {token}"}
+            async with aiohttp.ClientSession() as session:
+                async with session.get(api_url, headers=headers) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        api_success = True
+                        break
+                    elif response.status in [401, 403] and attempt == 0:
+                        print("⚠️ Token expired during request. Refreshing now...")
+                        token = await get_valid_token(force_refresh=True)
+                    else:
+                        await status_msg.edit_text(f"❌ API error! Status code: {response.status}")
+                        return
+
+        if not api_success:
+            await status_msg.edit_text("❌ Token refresh ചെയ്തിട്ടും ലോഗിൻ പരാജയപ്പെട്ടു. Refresh Token മാറിയിട്ടുണ്ടാകാം!")
+            return
+
+        files = data.get("files", [])
+        if not files:
+            await status_msg.edit_text("❌ Ee link-il files onnum kandilla.")
+            return
         
-        async with aiohttp.ClientSession() as session:
-            async with session.get(api_url, headers=headers) as response:
-                if response.status != 200:
-                    await status_msg.edit_text(f"❌ API error! Status code: {response.status}")
-                    return
-                
-                data = await response.json()
-                files = data.get("files", [])
-                if not files:
-                    await status_msg.edit_text("❌ Ee link-il files onnum kandilla.")
-                    return
-                
-                file_data = files[0]
-                dlink = file_data.get("dlink")
-                filename = file_data.get("filename", "video.mp4")
+        file_data = files[0]
+        dlink = file_data.get("dlink")
+        filename = file_data.get("filename", "video.mp4")
 
         if not dlink:
             await status_msg.edit_text("❌ Direct download link generate cheyyan pattiyilla.")
@@ -129,22 +174,23 @@ async def handle_terabox_link(client, message: Message):
         start_time = time.time()
         current_downloaded = 0
         
+        # Mobile Chrome User Agent + Referer Added for bypassing 80MB Throttling
         download_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
             "Accept": "*/*",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
+            "Referer": "https://www.terabox.com/"
         }
         
         async with aiohttp.ClientSession() as session:
             async with session.get(dlink, headers=download_headers) as resp:
                 if resp.status == 200:
                     total_size = int(resp.headers.get('content-length', 0))
-                    
                     async with aiofiles.open(filename, mode='wb') as f:
-                        async for chunk in resp.content.iter_chunked(5 * 1024 * 1024): 
+                        # 1MB Chunks for smooth large file flow
+                        async for chunk in resp.content.iter_chunked(1024 * 1024): 
                             await f.write(chunk)
                             current_downloaded += len(chunk)
-                            # user_id പാസ്സ് ചെയ്യുന്നു
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, "Downloading", user_id)
                 else:
                     await status_msg.edit_text(f"❌ Terabox server error. Status: {resp.status}")
@@ -163,13 +209,10 @@ async def handle_terabox_link(client, message: Message):
         )
 
     except asyncio.CancelledError:
-        # യൂസർ ക്യാൻസൽ അടിച്ചാൽ ഇവിടേക്ക് വരും
         await message.reply_text("🛑 **Process User പൂർണ്ണമായും Cancel ചെയ്തിരിക്കുന്നു!**")
     except Exception as e:
         await message.reply_text(f"❌ Oru error vannu: {str(e)}")
-    
     finally:
-        # ടാസ്ക് ലിസ്റ്റിൽ നിന്നും മാറ്റുന്നു, ഫയൽ ഡിലീറ്റ് ആക്കുന്നു
         active_tasks.pop(user_id, None)
         if filename and os.path.exists(filename):
             os.remove(filename)
@@ -182,15 +225,13 @@ async def handle_terabox_link(client, message: Message):
 @app.on_callback_query(filters.regex(r"^cancel_(\d+)"))
 async def cancel_callback(client, callback_query: CallbackQuery):
     target_user_id = int(callback_query.data.split("_")[1])
-    
-    # ലിങ്ക് ഇട്ട ആൾക്ക് മാത്രമേ ക്യാൻസൽ ചെയ്യാൻ പറ്റു എന്ന് ഉറപ്പാക്കുന്നു
     if callback_query.from_user.id != target_user_id:
         await callback_query.answer("❌ ഇത് നിന്റെ ടാസ്ക് അല്ല, നിനക്ക് ക്യാൻസൽ ചെയ്യാൻ പറ്റില്ല!", show_alert=True)
         return
         
     task = active_tasks.get(target_user_id)
     if task:
-        task.cancel() # റൺ ചെയ്യുന്ന കോഡ് സ്റ്റോപ്പ് ആക്കുന്നു
+        task.cancel()
         await callback_query.answer("🛑 Process Cancel ചെയ്യുന്നു...")
     else:
         await callback_query.answer("⚠️ ടാസ്ക് നിലവിൽ സജീവമല്ല അല്ലെങ്കിൽ കഴിഞ്ഞുപോയി.", show_alert=True)

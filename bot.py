@@ -183,32 +183,33 @@ async def handle_terabox_link(client, message: Message):
         start_time = time.time()
         current_downloaded = 0
         
-        # Base High-Speed Headers
+        # Default Base Headers
         download_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Connection": "keep-alive",
             "Referer": "https://www.terabox.com/",
-            "Accept-Language": "en-US,en;q=0.9"
+            "Accept": "*/*"
         }
         
-        # FIX: API തരുന്ന പ്രത്യേക Headers/Cookies ഉണ്ടെങ്കിൽ അത് കൂടി ഇതിലേക്ക് ചേർക്കുന്നു (Speed Boost)
-        api_provided_headers = file_data.get("headers", {})
-        if api_provided_headers:
-            download_headers.update(api_provided_headers)
+        # FIX: ഹെഡറുകൾ ഡ്യൂപ്ലിക്കേറ്റ് വരാതെ ക്ലീൻ ആയി സെറ്റ് ചെയ്യുന്നു
+        api_provided_headers = file_data.get("headers")
+        if api_provided_headers and isinstance(api_provided_headers, dict):
+            download_headers = {str(k): str(v) for k, v in api_provided_headers.items()}
+            # Referer നിർബന്ധമായതു കൊണ്ട് ഇല്ലെങ്കിൽ മാത്രം ചേർക്കുന്നു
+            if "Referer" not in download_headers and "referer" not in download_headers:
+                download_headers["Referer"] = "https://www.terabox.com/"
         
         async with aiohttp.ClientSession() as session:
             async with session.get(dlink, headers=download_headers) as resp:
                 if resp.status == 200:
                     total_size = int(resp.headers.get('content-length', 0))
                     async with aiofiles.open(filename, mode='wb') as f:
-                        # 128KB അലോക്കേഷൻ സ്റ്റേബിൾ കണക്ഷന് വേണ്ടി
                         async for chunk in resp.content.iter_chunked(1024 * 128): 
                             await f.write(chunk)
                             current_downloaded += len(chunk)
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, "Downloading", user_id)
                 else:
-                    await status_msg.edit_text(f"❌ Terabox server error. Status: {resp.status}")
+                    # ഇവിടെ വെച്ച് എന്താണ് എറർ എന്ന് കൃത്യമായി കാണിക്കും
+                    await status_msg.edit_text(f"❌ **Terabox Download Failed!**\nServer returned status code: `{resp.status}`\n\nമാറ്റ് ഏതെങ്കിലും ലിങ്ക് അയച്ചു നോക്കുക.")
                     delete_status = False
                     return
 

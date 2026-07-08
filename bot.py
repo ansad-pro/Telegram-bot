@@ -1,6 +1,7 @@
 import os
 import time
 import math
+import random
 import asyncio
 import threading
 import urllib.parse
@@ -25,6 +26,24 @@ app = Client("terabox_bot", api_id=int(API_ID), api_hash=API_HASH, bot_token=BOT
 
 active_tasks = {}
 last_progress_text = {} 
+
+# --- FIX: USER-AGENT PROFILES (ROTATION POOL) ---
+BROWSER_PROFILES = [
+    # macOS Safari
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+    # Windows Edge
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 Edg/122.0.0.0",
+    # Ubuntu Chrome
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    # macOS Chrome
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    # Windows Chrome
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+]
+
+def get_random_browser_ua():
+    return random.choice(BROWSER_PROFILES)
+# -----------------------------------------------
 
 # --- FAKE PORT SERVER FOR KOYEB TIMEOUT FIX ---
 def run_dummy_server():
@@ -131,7 +150,6 @@ async def handle_terabox_link(client, message: Message):
     try:
         url = message.text
         encoded_url = urllib.parse.quote(url)
-        # FIX 1: mode=download ആക്കി മാറ്റി
         api_url = f"https://api.tera-peek.in/api/resolve?url={encoded_url}&mode=download"
         
         token = await get_valid_token()
@@ -184,19 +202,22 @@ async def handle_terabox_link(client, message: Message):
         start_time = time.time()
         current_downloaded = 0
         
-        # FIX 2: Terabox Official PC/App User-Agent വഴി സ്പീഡ് കൂട്ടാൻ നോക്കുന്നു
+        # FIX: റാൻഡം ബ്രൗസർ പ്രൊഫൈൽ ഹെഡറിലേക്ക് ലോഡ് ചെയ്യുന്നു
+        random_ua = get_random_browser_ua()
         download_headers = {
-            "User-Agent": "netdisk;PC",
+            "User-Agent": random_ua,
             "Referer": "https://www.terabox.com/",
             "Accept": "*/*",
-            "Connection": "keep-alive"
+            "Connection": "keep-alive",
+            "Accept-Language": "en-US,en;q=0.9"
         }
         
         api_provided_headers = file_data.get("headers")
         if api_provided_headers and isinstance(api_provided_headers, dict):
-            download_headers.update({str(k): str(v) for k, v in api_provided_headers.items()})
-            if "Referer" not in download_headers and "referer" not in download_headers:
-                download_headers["Referer"] = "https://www.terabox.com/"
+            # API തരുന്ന ഹെഡറുകൾ കൂടി ഡ്യൂപ്ലിക്കേഷൻ ഇല്ലാതെ സുരക്ഷിതമായി ആഡ് ചെയ്യുന്നു
+            for k, v in api_provided_headers.items():
+                if k.lower() not in ["user-agent", "referer"]:
+                    download_headers[k] = str(v)
         
         async with aiohttp.ClientSession() as session:
             async with session.get(dlink, headers=download_headers) as resp:
@@ -208,7 +229,7 @@ async def handle_terabox_link(client, message: Message):
                             current_downloaded += len(chunk)
                             await progress_bar(current_downloaded, total_size, status_msg, start_time, "Downloading", user_id)
                 else:
-                    await status_msg.edit_text(f"❌ **Terabox Download Failed!**\nServer returned status code: `{resp.status}`\n\nമാറ്റ് ഏതെങ്കിലും ലിങ്ക് അയച്ചു നോക്കുക.")
+                    await status_msg.edit_text(f"❌ **Terabox Download Failed!**\nServer returned status code: `{resp.status}`\n\nലിങ്ക് മാറ്റി നോക്കുക.")
                     delete_status = False
                     return
 
